@@ -4,18 +4,25 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/synchronizer.h>
 #include <pcl/PolygonMesh.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/filters/filter.h>
+#include <pcl/io/ply_io.h>
 #include <pcl/surface/poisson.h>
 
 #include <Eigen/Core>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <cmath>
 #include <dk_perception/detection/d3/rectangle_detection.hpp>
 #include <dk_perception/dnn/superpoint.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
+#include <pcl/impl/point_types.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <visualization_msgs/msg/marker.hpp>
 
 #include "dk_perception/detection/d2/node_extractor.hpp"
 #include "dk_perception/type/pointcloud/rgbd_type.hpp"
@@ -24,6 +31,46 @@ template <typename ImageType>
 void minmaxFilter(cv::Mat& img, ImageType min, ImageType max) {
   cv::Mat mask = (img >= min) & (img <= max);
   img.setTo(0, ~mask);  // Set pixels outside the range to 0
+}
+
+pcl::PolygonMesh generateMesh(
+    const pcl::PointCloud<pcl::PointNormal>::Ptr& cloud) {
+  pcl::Poisson<pcl::PointNormal> poisson;
+  int poisson_depth = 8;
+  poisson.setDepth(poisson_depth);
+  poisson.setInputCloud(cloud);
+
+  pcl::PolygonMesh mesh;
+  poisson.reconstruct(mesh);
+  return mesh;
+}
+
+using namespace Eigen;
+
+// TODO: 高速化のためにhttps://github.com/lighttransport/nanortに置き換える
+bool rayTriangleIntersect(const Vector3f& orig, const Vector3f& dir,
+                          const Vector3f& v0, const Vector3f& v1,
+                          const Vector3f& v2, float& t, float& u, float& v) {
+  const float EPSILON = 1e-7;
+  Vector3f edge1 = v1 - v0;
+  Vector3f edge2 = v2 - v0;
+  Vector3f h = dir.cross(edge2);
+  float a = edge1.dot(h);
+  if (fabs(a) < EPSILON) return false;  // parallel
+
+  float f = 1.0 / a;
+  Vector3f s = orig - v0;
+  u = f * s.dot(h);
+  if (u < 0.0 || u > 1.0) return false;
+
+  Vector3f q = s.cross(edge1);
+  v = f * dir.dot(q);
+  if (v < 0.0 || u + v > 1.0) return false;
+
+  t = f * edge2.dot(q);
+  if (t > EPSILON) return true;  // hit
+
+  return false;
 }
 
 class Rectangle3dDetectionNode : public rclcpp::Node {
@@ -42,7 +89,7 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     this->declare_parameter("superpoint_vocab_dict_path",
                             "focus_descriptors.csv");
     this->declare_parameter("superpoint_model_path", "superpoint.onnx");
-    this->declare_parameter("superpoint_vocab_similarity_threshold", 0.4);
+    this->declare_parameter("superpoint_vocab_similarity_threshold", 0.5);
     this->declare_parameter("superpoint_min_score", 0.0005);
     // Get parameters
 
@@ -76,6 +123,9 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     depth_max_threshold_ =
         this->get_parameter("depth_max_threshold").as_double();
 
+    mesh_publisher_ = this->create_publisher<visualization_msgs::msg::Marker>(
+        "mesh_visualization", 10);
+
     // Initialize subscribers with message filters
     image1_sub_.subscribe(this, "color_image");
     image2_sub_.subscribe(this, "depth_image");
@@ -108,6 +158,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
   }
 
  private:
+  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr mesh_publisher_;
+
   using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<
       sensor_msgs::msg::Image, sensor_msgs::msg::Image,
       sensor_msgs::msg::CameraInfo>;
@@ -167,10 +219,10 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
 
       dklib::perception::type::pointcloud::DepthImageSet rgbd{
           cv_image1->image, depth_image, intrinsic,
-          static_cast<float>(depth_factor_)};
+          static_cast<float>(1.0 / depth_factor_)};
 
       // Process images and camera info
-      processImages(rgbd);
+      processImages(rgbd, image1_msg->header);
     } catch (const cv_bridge::Exception& e) {
       RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
     } catch (const std::exception& e) {
@@ -180,7 +232,25 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
 
   // Process the synchronized images and camera info
   void processImages(
-      const dklib::perception::type::pointcloud::DepthImageSet& rgbd) {
+      const dklib::perception::type::pointcloud::DepthImageSet& rgbd,
+      const std_msgs::msg::Header& header) {
+    /**
+    int down_size_scale = 2;
+cv::Mat srgb, sdepth;
+cv::resize(rgbd.color_image(), srgb,
+           cv::Size(rgbd.color_image().cols / down_size_scale,
+                    rgbd.color_image().rows / down_size_scale));
+cv::resize(rgbd.depth_image(), sdepth,
+           cv::Size(rgbd.depth_image().cols / down_size_scale,
+                    rgbd.depth_image().rows / down_size_scale));
+                    Eigen::Matrix3f sintrinsic =
+                    rgbd.intrinsic() / static_cast<float>(down_size_scale);
+                    sintrinsic(2, 2) =
+                    1.0f;  // Set the last element to 1.0 for homogeneous
+coordinates dklib::perception::type::pointcloud::DepthImageSet srgbd{ srgb,
+sdepth, sintrinsic, rgbd.depth_factor()};
+                      **/
+
     const double superpoint_vocab_similarity_threshold =
         this->get_parameter("superpoint_vocab_similarity_threshold")
             .as_double();
@@ -195,6 +265,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     node_extractor.setROI(cv::Rect(100, 100, rgbd.color_image().cols - 200,
                                    rgbd.color_image().rows - 200));
     auto points = node_extractor.extract(rgbd.color_image());
+    RCLCPP_INFO_STREAM(this->get_logger(),
+                       "Extracted " << points.size() << " keypoints");
     cv::Mat draw_image = rgbd.color_image().clone();
     for (const auto& point : points) {
       cv::circle(draw_image, point, 3, cv::Scalar(0, 255, 0), -1);
@@ -202,17 +274,173 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     cv::imshow("Detected Keypoints", draw_image);
     cv::waitKey(1);
 
+    // 3d
+    dklib::perception::type::pointcloud::
+        IteratableColorizedPointCloudReadOnlyAccessor<
+            dklib::perception::type::pointcloud::DepthImageSet>
+            accessor(rgbd);
+    pcl::PointCloud<pcl::PointNormal>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointNormal>);
+
+    cloud->reserve(accessor.size());
+    for (size_t i = 0; i < accessor.size(); ++i) {
+      const Eigen::Vector3f point = accessor.point_at(i);
+      cloud->emplace_back(point.x(), point.y(), point.z());
+    }
+    RCLCPP_INFO(this->get_logger(), "Point cloud size: %zu", cloud->size());
+    // Remove any NaN points
+    std::vector<int> indices;
+    cloud->is_dense = false;  // Set to false to allow NaN points
+    pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
+
+    pcl::search::KdTree<pcl::PointNormal>::Ptr tree(
+        new pcl::search::KdTree<pcl::PointNormal>());
+    tree->setInputCloud(cloud);
+
+    pcl::NormalEstimation<pcl::PointNormal, pcl::PointNormal> ne;
+    ne.setInputCloud(cloud);
+    ne.setSearchMethod(tree);
+    ne.setKSearch(20);
+    ne.compute(*cloud);
+
     pcl::Poisson<pcl::PointNormal> poisson_reconstructor_;
-    pcl::PolygonMesh mesh;
+    pcl::PolygonMesh mesh = generateMesh(cloud);
+    publishMeshMarker(mesh, header);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr mesh_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::fromPCLPointCloud2(mesh.cloud, *mesh_cloud);
+
+    Eigen::Matrix3f intrinsic = rgbd.intrinsic();
+
+    Eigen::Vector3f ray_origin(0.0f, 0.0f, 0.0f);
+    std::vector<Eigen::Vector3f> hit_points;
+    for (const auto& pt : points) {
+      Eigen::Vector3f ray_direction((pt.x - intrinsic(0, 2)) / intrinsic(0, 0),
+                                    (pt.y - intrinsic(1, 2)) / intrinsic(1, 1),
+                                    1.0f);
+      ray_direction.normalize();
+
+      float closest_t = std::numeric_limits<float>::infinity();
+      Eigen::Vector3f hit_point;
+      for (const auto& polygon : mesh.polygons) {
+        if (polygon.vertices.size() < 3) continue;  // Skip invalid polygons
+        const pcl::PointXYZ& v0 = mesh_cloud->points[polygon.vertices[0]];
+        const pcl::PointXYZ& v1 = mesh_cloud->points[polygon.vertices[1]];
+        const pcl::PointXYZ& v2 = mesh_cloud->points[polygon.vertices[2]];
+        float t, u, v;
+        bool hit = rayTriangleIntersect(
+            ray_origin, ray_direction, Eigen::Vector3f(v0.x, v0.y, v0.z),
+            Eigen::Vector3f(v1.x, v1.y, v1.z),
+            Eigen::Vector3f(v2.x, v2.y, v2.z), t, u, v);
+        if (hit) {
+          if (t > 0 && t < closest_t) {
+            closest_t = t;
+            hit_point = ray_origin + t * ray_direction;
+          }
+        }
+      }
+
+      if (std::isfinite(closest_t) &&
+          closest_t < std::numeric_limits<float>::infinity()) {
+        // RCLCPP_INFO_STREAM(this->get_logger(),
+        //                    "Hit point found at: " << hit_point.transpose());
+        hit_points.push_back(hit_point);
+      }
+    }
+    publishPointsMarker(hit_points, header);
 
     dklib::perception::detection::d3::RectangleDetection<
         pcl::Poisson<pcl::PointNormal>>
         detector;
+
     // Example: You would use your rectangle detection functionality here
     // dk_perception::detection::d3::RectangleDetection detector;
     // auto rectangles = detector.detect(image1, image2, camera_info);
 
     // Process detection results...
+  }
+
+  void publishPointsMarker(const std::vector<Eigen::Vector3f>& points,
+                           const std_msgs::msg::Header& header) {
+    visualization_msgs::msg::Marker marker;
+    marker.header = header;
+    marker.ns = "points";
+    marker.id = 1;
+    marker.type = visualization_msgs::msg::Marker::POINTS;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.position.x = 0;
+    marker.pose.position.y = 0;
+    marker.pose.position.z = 0;
+    marker.pose.orientation.x = 0.0;
+    marker.pose.orientation.y = 0.0;
+    marker.pose.orientation.z = 0.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 0.01;  // Point size
+    marker.scale.y = 0.01;  // Point size
+    marker.color.r = 1.0;
+    marker.color.g = 0.0;
+    marker.color.b = 0.0;
+    marker.color.a = 1.0;
+
+    marker.points.reserve(points.size());
+    for (const auto& point : points) {
+      geometry_msgs::msg::Point p;
+      p.x = point.x();
+      p.y = point.y();
+      p.z = point.z();
+      marker.points.push_back(p);
+    }
+
+    mesh_publisher_->publish(marker);
+    RCLCPP_INFO(this->get_logger(), "Points visualization published.");
+  }
+
+  void publishMeshMarker(const pcl::PolygonMesh& mesh,
+                         const std_msgs::msg::Header& header) {
+    visualization_msgs::msg::Marker marker;
+    marker.header = header;
+    marker.ns = "mesh";
+    marker.id = 0;
+    marker.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.position.x = 0;
+    marker.pose.position.y = 0;
+    marker.pose.position.z = 0;
+    marker.pose.orientation.x = 0.0;
+    marker.pose.orientation.y = 0.0;
+    marker.pose.orientation.z = 0.0;
+    marker.pose.orientation.w = 1.0;
+    marker.scale.x = 1.0;
+    marker.scale.y = 1.0;
+    marker.scale.z = 1.0;
+    marker.color.r = 0.0;
+    marker.color.g = 1.0;
+    marker.color.b = 0.0;
+    marker.color.a = 1.0;
+    marker.frame_locked = false;
+
+    // Convert the mesh to triangle list
+    pcl::PointCloud<pcl::PointXYZ> cloud;
+    pcl::fromPCLPointCloud2(mesh.cloud, cloud);
+
+    // Add all triangles to the marker
+    for (const auto& polygon : mesh.polygons) {
+      if (polygon.vertices.size() >= 3) {
+        for (size_t i = 0; i < 3; ++i) {
+          geometry_msgs::msg::Point p;
+          p.x = cloud.points[polygon.vertices[i]].x;
+          p.y = cloud.points[polygon.vertices[i]].y;
+          p.z = cloud.points[polygon.vertices[i]].z;
+          marker.points.push_back(p);
+        }
+      }
+    }
+
+    mesh_publisher_->publish(marker);
+    RCLCPP_INFO(this->get_logger(),
+                "Mesh visualization published with %zu points.",
+                marker.points.size());
   }
 };
 
