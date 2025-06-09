@@ -396,13 +396,21 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
         rat_constructor;
 
     auto rat_start_time = std::chrono::high_resolution_clock::now();
-    std::vector<std::array<size_t, 3>> triangles =
-        rat_constructor.construct(hit_points);
+    auto triangles = rat_constructor.construct(hit_points);
     auto rat_end_time = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> rat_duration = rat_end_time - rat_start_time;
     RCLCPP_INFO(this->get_logger(),
                 "Right-angle triangle construction took %.3f seconds",
                 rat_duration.count());
+
+    RCLCPP_INFO(this->get_logger(), "Detected %zu right-angle triangles",
+                triangles.size());
+    if (triangles.empty()) {
+      dklib::perception::detection::d3::excludeInvalidTriangles<
+          pcl::PointNormal>(hit_points, triangles, tree, 10, 0.01);
+    }
+    RCLCPP_INFO(this->get_logger(), "filtered %zu right-angle triangles",
+                triangles.size());
 
     publishMeshMarker(mesh, header);
     publishPointsMarker(hit_points, header);
@@ -450,17 +458,18 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
 
   void publishTrianglesMarker(
       const std::vector<Eigen::Vector3f>& points,
-      const std::vector<std::array<size_t, 3>>& triangles,
+      const std::vector<dklib::perception::detection::d3::RightAngleTriangle>&
+          triangles,
       const std_msgs::msg::Header& header)  // NOLINT
   {
     visualization_msgs::msg::MarkerArray marker_array;
     for (size_t i = 0; i < triangles.size(); ++i) {
-      if (triangles[i].size() != 3) {
-        RCLCPP_WARN(this->get_logger(),
-                    "Triangle %zu does not have exactly 3 vertices, skipping.",
-                    i);
-        continue;
-      }
+      // if (triangles[i].vertex_indices.size() != 3) {
+      //   RCLCPP_WARN(this->get_logger(),
+      //               "Triangle %zu does not have exactly 3 vertices,
+      //               skipping.", i);
+      //   continue;
+      // }
 
       visualization_msgs::msg::Marker marker;
       marker.header = header;
