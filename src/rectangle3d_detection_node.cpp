@@ -18,11 +18,13 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 #include <pcl/impl/point_types.hpp>
+#include <rclcpp/publisher.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include "dk_perception/detection/d2/node_extractor.hpp"
 #include "dk_perception/type/pointcloud/rgbd_type.hpp"
@@ -125,6 +127,9 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
 
     mesh_publisher_ = this->create_publisher<visualization_msgs::msg::Marker>(
         "mesh_visualization", 10);
+    mesh_array_publisher_ =
+        this->create_publisher<visualization_msgs::msg::MarkerArray>(
+            "mesh_array_visualization", 10);
 
     // Initialize subscribers with message filters
     image1_sub_.subscribe(this, "color_image");
@@ -159,6 +164,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
 
  private:
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr mesh_publisher_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+      mesh_array_publisher_;
 
   using ApproxSyncPolicy = message_filters::sync_policies::ApproximateTime<
       sensor_msgs::msg::Image, sensor_msgs::msg::Image,
@@ -343,12 +350,29 @@ sdepth, sintrinsic, rgbd.depth_factor()};
 
       if (std::isfinite(closest_t) &&
           closest_t < std::numeric_limits<float>::infinity()) {
-        // RCLCPP_INFO_STREAM(this->get_logger(),
-        //                    "Hit point found at: " << hit_point.transpose());
+        pcl::PointNormal search_point(hit_point.x(), hit_point.y(),
+                                      hit_point.z());
+        std::vector<int> k_indices;
+        std::vector<float> k_sqr_distances;
+        tree->nearestKSearch(search_point, 1, k_indices, k_sqr_distances);
+        constexpr double distance_threshold = 0.03;
+        if (k_sqr_distances.empty() ||
+            k_sqr_distances[0] > distance_threshold * distance_threshold) {
+          // RCLCPP_WARN(this->get_logger(),
+          //             "No valid point found within distance threshold.");
+          continue;
+        }
         hit_points.push_back(hit_point);
       }
     }
     publishPointsMarker(hit_points, header);
+
+    dklib::perception::detection::d3::RightAngleTriangleConstructor<
+        Eigen::Vector3f>
+        rat_constructor;
+    std::vector<std::array<size_t, 3>> triangles =
+        rat_constructor.construct(hit_points);
+    publishTrianglesMarker(hit_points, triangles, header);
 
     dklib::perception::detection::d3::RectangleDetection<
         pcl::Poisson<pcl::PointNormal>>
@@ -394,6 +418,67 @@ sdepth, sintrinsic, rgbd.depth_factor()};
 
     mesh_publisher_->publish(marker);
     RCLCPP_INFO(this->get_logger(), "Points visualization published.");
+  }
+
+  void publishTrianglesMarker(
+      const std::vector<Eigen::Vector3f>& points,
+      const std::vector<std::array<size_t, 3>>& triangles,
+      const std_msgs::msg::Header& header)  // NOLINT
+  {
+    visualization_msgs::msg::MarkerArray marker_array;
+    for (size_t i = 0; i < triangles.size(); ++i) {
+      if (triangles[i].size() != 3) {
+        RCLCPP_WARN(this->get_logger(),
+                    "Triangle %zu does not have exactly 3 vertices, skipping.",
+                    i);
+        continue;
+      }
+
+      visualization_msgs::msg::Marker marker;
+      marker.header = header;
+      marker.ns = "triangles";
+      marker.id = static_cast<uint32_t>(i) + 2;
+      marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.pose.position.x = 0;
+      marker.pose.position.y = 0;
+      marker.pose.position.z = 0;
+      marker.pose.orientation.x = 0.0;
+      marker.pose.orientation.y = 0.0;
+      marker.pose.orientation.z = 0.0;
+      marker.pose.orientation.w = 1.0;
+      marker.scale.x = 0.005;
+      marker.scale.y = 1.0;
+      marker.scale.z = 1.0;
+      marker.color.r = 0.0;
+      marker.color.g = 0.0;
+      marker.color.b = 1.0;
+      marker.color.a = 1.0;
+
+      for (size_t j = 0; j < 3; ++j) {
+        if (triangles[i][j] >= points.size()) {
+          RCLCPP_WARN(this->get_logger(),
+                      "Triangle %zu has vertex index %zu out of bounds, "
+                      "skipping.",
+                      i, triangles[i][j]);
+          continue;
+        }
+        geometry_msgs::msg::Point start_point;
+        start_point.x = points[triangles[i][j]].x();
+        start_point.y = points[triangles[i][j]].y();
+        start_point.z = points[triangles[i][j]].z();
+
+        geometry_msgs::msg::Point end_point;
+        end_point.x = points[triangles[i][(j + 1) % 3]].x();
+        end_point.y = points[triangles[i][(j + 1) % 3]].y();
+        end_point.z = points[triangles[i][(j + 1) % 3]].z();
+        marker.points.push_back(start_point);
+        marker.points.push_back(end_point);
+      }
+      marker_array.markers.push_back(marker);
+    }
+
+    mesh_array_publisher_->publish(marker_array);
   }
 
   void publishMeshMarker(const pcl::PolygonMesh& mesh,
