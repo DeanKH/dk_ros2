@@ -1,0 +1,6 @@
+== run
+
+[source, shell]
+----
+ros2 run dk_ros2 rectangle3d_detection_node --ros-args -r color_image:=/camera/color/image_raw -r depth_image:=/camera/depth/image_raw -r rgbd_camera_info:=/camera/color/camera_info -p superpoint_model_path:=/home/developer/workspace/install/dk_perception/share/dk_perception/weights/superpoint.onnx -p superpoint_vocab_dict_path:=/home/developer/workspace/src/dk_perception/example/data/focus_descriptors.csv -p queue_size:=3
+----

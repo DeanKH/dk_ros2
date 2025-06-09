@@ -6,6 +6,8 @@
 #include <pcl/PolygonMesh.h>
 #include <pcl/features/normal_3d.h>
 #include <pcl/filters/filter.h>
+#include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/voxel_grid.h>
 #include <pcl/io/ply_io.h>
 #include <pcl/surface/poisson.h>
 
@@ -79,7 +81,7 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
  public:
   explicit Rectangle3dDetectionNode(const rclcpp::NodeOptions& options)
       : Node("rectangle3d_detection_node", options) {
-    RCLCPP_INFO(this->get_logger(), "Starting Rectangle3D Detection Node");
+    RCLCPP_DEBUG(this->get_logger(), "Starting Rectangle3D Detection Node");
 
     // Declare parameters
     this->declare_parameter("use_exact_time", false);
@@ -93,6 +95,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     this->declare_parameter("superpoint_model_path", "superpoint.onnx");
     this->declare_parameter("superpoint_vocab_similarity_threshold", 0.5);
     this->declare_parameter("superpoint_min_score", 0.0005);
+
+    this->declare_parameter("voxel_leaf_size", 0.01);
     // Get parameters
 
     superpoint_vocab_dict_path_ =
@@ -125,6 +129,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
     depth_max_threshold_ =
         this->get_parameter("depth_max_threshold").as_double();
 
+    process_image_publisher_ =
+        this->create_publisher<sensor_msgs::msg::Image>("processed_image", 10);
     mesh_publisher_ = this->create_publisher<visualization_msgs::msg::Marker>(
         "mesh_visualization", 10);
     mesh_array_publisher_ =
@@ -146,8 +152,8 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
           &Rectangle3dDetectionNode::callback, this, std::placeholders::_1,
           std::placeholders::_2, std::placeholders::_3));
 
-      RCLCPP_INFO(this->get_logger(),
-                  "Using Exact Time synchronization policy");
+      RCLCPP_DEBUG(this->get_logger(),
+                   "Using Exact Time synchronization policy");
     } else {
       // Use approximate time synchronization (default)
       approx_policy_ = std::make_shared<ApproxSyncPolicy>(queue_size);
@@ -157,12 +163,14 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
           &Rectangle3dDetectionNode::callback, this, std::placeholders::_1,
           std::placeholders::_2, std::placeholders::_3));
 
-      RCLCPP_INFO(this->get_logger(),
-                  "Using Approximate Time synchronization policy");
+      RCLCPP_DEBUG(this->get_logger(),
+                   "Using Approximate Time synchronization policy");
     }
   }
 
  private:
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
+      process_image_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr mesh_publisher_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
       mesh_array_publisher_;
@@ -199,14 +207,16 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
       const sensor_msgs::msg::Image::ConstSharedPtr& image1_msg,
       const sensor_msgs::msg::Image::ConstSharedPtr& image2_msg,
       const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg) {
-    RCLCPP_INFO(this->get_logger(), "Received synchronized messages");
-    RCLCPP_INFO(this->get_logger(), "Image1 timestamp: %u.%u",
-                image1_msg->header.stamp.sec, image1_msg->header.stamp.nanosec);
-    RCLCPP_INFO(this->get_logger(), "Image2 timestamp: %u.%u",
-                image2_msg->header.stamp.sec, image2_msg->header.stamp.nanosec);
-    RCLCPP_INFO(this->get_logger(), "CameraInfo timestamp: %u.%u",
-                camera_info_msg->header.stamp.sec,
-                camera_info_msg->header.stamp.nanosec);
+    RCLCPP_DEBUG(this->get_logger(), "Received synchronized messages");
+    RCLCPP_DEBUG(this->get_logger(), "Image1 timestamp: %u.%u",
+                 image1_msg->header.stamp.sec,
+                 image1_msg->header.stamp.nanosec);
+    RCLCPP_DEBUG(this->get_logger(), "Image2 timestamp: %u.%u",
+                 image2_msg->header.stamp.sec,
+                 image2_msg->header.stamp.nanosec);
+    RCLCPP_DEBUG(this->get_logger(), "CameraInfo timestamp: %u.%u",
+                 camera_info_msg->header.stamp.sec,
+                 camera_info_msg->header.stamp.nanosec);
 
     try {
       // Convert ROS image messages to OpenCV images
@@ -241,23 +251,6 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
   void processImages(
       const dklib::perception::type::pointcloud::DepthImageSet& rgbd,
       const std_msgs::msg::Header& header) {
-    /**
-    int down_size_scale = 2;
-cv::Mat srgb, sdepth;
-cv::resize(rgbd.color_image(), srgb,
-           cv::Size(rgbd.color_image().cols / down_size_scale,
-                    rgbd.color_image().rows / down_size_scale));
-cv::resize(rgbd.depth_image(), sdepth,
-           cv::Size(rgbd.depth_image().cols / down_size_scale,
-                    rgbd.depth_image().rows / down_size_scale));
-                    Eigen::Matrix3f sintrinsic =
-                    rgbd.intrinsic() / static_cast<float>(down_size_scale);
-                    sintrinsic(2, 2) =
-                    1.0f;  // Set the last element to 1.0 for homogeneous
-coordinates dklib::perception::type::pointcloud::DepthImageSet srgbd{ srgb,
-sdepth, sintrinsic, rgbd.depth_factor()};
-                      **/
-
     const double superpoint_vocab_similarity_threshold =
         this->get_parameter("superpoint_vocab_similarity_threshold")
             .as_double();
@@ -272,15 +265,17 @@ sdepth, sintrinsic, rgbd.depth_factor()};
     node_extractor.setROI(cv::Rect(100, 100, rgbd.color_image().cols - 200,
                                    rgbd.color_image().rows - 200));
     auto points = node_extractor.extract(rgbd.color_image());
-    RCLCPP_INFO_STREAM(this->get_logger(),
-                       "Extracted " << points.size() << " keypoints");
+    RCLCPP_DEBUG_STREAM(this->get_logger(),
+                        "Extracted " << points.size() << " keypoints");
     cv::Mat draw_image = rgbd.color_image().clone();
     for (const auto& point : points) {
       cv::circle(draw_image, point, 3, cv::Scalar(0, 255, 0), -1);
     }
-    cv::imshow("Detected Keypoints", draw_image);
-    cv::waitKey(1);
 
+    {
+      auto msg = cv_bridge::CvImage(header, "bgr8", draw_image).toImageMsg();
+      process_image_publisher_->publish(*msg);
+    }
     // 3d
     dklib::perception::type::pointcloud::
         IteratableColorizedPointCloudReadOnlyAccessor<
@@ -300,19 +295,43 @@ sdepth, sintrinsic, rgbd.depth_factor()};
     cloud->is_dense = false;  // Set to false to allow NaN points
     pcl::removeNaNFromPointCloud(*cloud, *cloud, indices);
 
+    pcl::VoxelGrid<pcl::PointNormal> voxel_grid;
+    voxel_grid.setInputCloud(cloud);
+    const float leaf_size =
+        static_cast<float>(this->get_parameter("voxel_leaf_size").as_double());
+    voxel_grid.setLeafSize(leaf_size, leaf_size, leaf_size);
+    voxel_grid.filter(*cloud);
+    RCLCPP_INFO(this->get_logger(), "After voxel grid filtering: %zu points",
+                cloud->size());
+    pcl::StatisticalOutlierRemoval<pcl::PointNormal> sor;
+    sor.setInputCloud(cloud);
+    sor.setMeanK(50);
+    sor.setStddevMulThresh(1.0);
+    sor.filter(*cloud);
+
     pcl::search::KdTree<pcl::PointNormal>::Ptr tree(
         new pcl::search::KdTree<pcl::PointNormal>());
     tree->setInputCloud(cloud);
 
+    auto ne_start_time = std::chrono::high_resolution_clock::now();
     pcl::NormalEstimation<pcl::PointNormal, pcl::PointNormal> ne;
     ne.setInputCloud(cloud);
     ne.setSearchMethod(tree);
     ne.setKSearch(20);
     ne.compute(*cloud);
+    auto ne_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> ne_duration = ne_end_time - ne_start_time;
+    RCLCPP_INFO(this->get_logger(), "Normal estimation took %.3f seconds",
+                ne_duration.count());
 
-    pcl::Poisson<pcl::PointNormal> poisson_reconstructor_;
+    auto mesh_reconstruct_start_time =
+        std::chrono::high_resolution_clock::now();
     pcl::PolygonMesh mesh = generateMesh(cloud);
-    publishMeshMarker(mesh, header);
+    auto mesh_reconstruct_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> mesh_reconstruct_duration =
+        mesh_reconstruct_end_time - mesh_reconstruct_start_time;
+    RCLCPP_INFO(this->get_logger(), "Mesh reconstruction took %.3f seconds",
+                mesh_reconstruct_duration.count());
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr mesh_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
@@ -320,6 +339,7 @@ sdepth, sintrinsic, rgbd.depth_factor()};
 
     Eigen::Matrix3f intrinsic = rgbd.intrinsic();
 
+    auto intersection_start_time = std::chrono::high_resolution_clock::now();
     Eigen::Vector3f ray_origin(0.0f, 0.0f, 0.0f);
     std::vector<Eigen::Vector3f> hit_points;
     for (const auto& pt : points) {
@@ -358,31 +378,39 @@ sdepth, sintrinsic, rgbd.depth_factor()};
         constexpr double distance_threshold = 0.03;
         if (k_sqr_distances.empty() ||
             k_sqr_distances[0] > distance_threshold * distance_threshold) {
-          // RCLCPP_WARN(this->get_logger(),
-          //             "No valid point found within distance threshold.");
           continue;
         }
         hit_points.push_back(hit_point);
       }
     }
-    publishPointsMarker(hit_points, header);
+    auto intersection_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> intersection_duration =
+
+        intersection_end_time - intersection_start_time;
+    RCLCPP_INFO(this->get_logger(),
+                "intersection mesh and rays took %.3f seconds",
+                intersection_duration.count());
 
     dklib::perception::detection::d3::RightAngleTriangleConstructor<
         Eigen::Vector3f>
         rat_constructor;
+
+    auto rat_start_time = std::chrono::high_resolution_clock::now();
     std::vector<std::array<size_t, 3>> triangles =
         rat_constructor.construct(hit_points);
+    auto rat_end_time = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> rat_duration = rat_end_time - rat_start_time;
+    RCLCPP_INFO(this->get_logger(),
+                "Right-angle triangle construction took %.3f seconds",
+                rat_duration.count());
+
+    publishMeshMarker(mesh, header);
+    publishPointsMarker(hit_points, header);
     publishTrianglesMarker(hit_points, triangles, header);
 
     dklib::perception::detection::d3::RectangleDetection<
         pcl::Poisson<pcl::PointNormal>>
         detector;
-
-    // Example: You would use your rectangle detection functionality here
-    // dk_perception::detection::d3::RectangleDetection detector;
-    // auto rectangles = detector.detect(image1, image2, camera_info);
-
-    // Process detection results...
   }
 
   void publishPointsMarker(const std::vector<Eigen::Vector3f>& points,
@@ -417,7 +445,7 @@ sdepth, sintrinsic, rgbd.depth_factor()};
     }
 
     mesh_publisher_->publish(marker);
-    RCLCPP_INFO(this->get_logger(), "Points visualization published.");
+    RCLCPP_DEBUG(this->get_logger(), "Points visualization published.");
   }
 
   void publishTrianglesMarker(
@@ -523,9 +551,9 @@ sdepth, sintrinsic, rgbd.depth_factor()};
     }
 
     mesh_publisher_->publish(marker);
-    RCLCPP_INFO(this->get_logger(),
-                "Mesh visualization published with %zu points.",
-                marker.points.size());
+    RCLCPP_DEBUG(this->get_logger(),
+                 "Mesh visualization published with %zu points.",
+                 marker.points.size());
   }
 };
 
