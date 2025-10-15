@@ -407,7 +407,7 @@ class Rectangle3dDetectionNode : public rclcpp::Node {
                 triangles.size());
     if (triangles.empty()) {
       dklib::perception::detection::d3::excludeInvalidTriangles<
-          pcl::PointNormal>(hit_points, triangles, tree, 10, 0.01);
+          pcl::PointNormal>(hit_points, triangles, tree, 20, 0.01, 0.1);
     }
     RCLCPP_INFO(this->get_logger(), "filtered %zu right-angle triangles",
                 triangles.size());

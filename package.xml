@@ -14,7 +14,7 @@
   <depend>geometry_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>dk_perception</depend>
-  <depend>OpenCV</depend>
+  <depend>libopencv-dev</depend>
   <depend>cv_bridge</depend>
   <depend>message_filters</depend>
 

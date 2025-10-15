@@ -68,6 +68,35 @@ target_link_libraries(
 # image_processing_node depth_meshing_node
 install(TARGETS rectangle3d_detection_node DESTINATION lib/${PROJECT_NAME})
 
+add_executable(rgbd_process_node src/container_detection_node.cpp)
+target_include_directories(
+  rgbd_process_node
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include> ${Eigen3_INCLUDE_DIRS})
+ament_target_dependencies(
+  rgbd_process_node
+  "rclcpp"
+  "sensor_msgs"
+  "geometry_msgs"
+  "visualization_msgs"
+  "dk_perception"
+  "PCL"
+  "cv_bridge"
+  "pcl_conversions"
+  "message_filters")
+
+target_link_libraries(
+  rgbd_process_node
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  dk_perception::common
+  dk_perception::type
+  dk_perception::dnn
+  dk_perception::detection)
+
+# image_processing_node depth_meshing_node
+install(TARGETS rgbd_process_node DESTINATION lib/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights comment the
