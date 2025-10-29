@@ -9,6 +9,14 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+include(FetchContent)
+FetchContent_Declare(
+  rerun_sdk
+  URL https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip
+)
+FetchContent_MakeAvailable(rerun_sdk)
+set_target_properties(rerun_sdk PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -25,6 +33,11 @@ find_package(cv_bridge REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(voxblox REQUIRED)
+
+# include(FetchContent) FetchContent_Declare( rerun_sdk URL
+# https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip )
+# FetchContent_MakeAvailable(rerun_sdk)
 
 # using openmp
 find_package(OpenMP REQUIRED)
@@ -100,7 +113,9 @@ target_link_libraries(
   dk_perception::common
   dk_perception::type
   dk_perception::dnn
-  dk_perception::detection)
+  dk_perception::detection
+  dk_perception::reconstruction
+  dk_perception::publisher_impl_rerun)
 
 # image_processing_node depth_meshing_node
 install(TARGETS rgbd_process_node DESTINATION lib/${PROJECT_NAME})

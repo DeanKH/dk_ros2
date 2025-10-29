@@ -17,9 +17,14 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <Eigen/Core>
+#include <Eigen/Geometry>
 #include <chrono>
+#include <dk_perception/detection/d3/marker_target_detection.hpp>
+#include <dk_perception/reconstruction/reconstruction.hpp>
+#include <dk_perception/rerun/publish_data.hpp>
 #include <pcl/impl/point_types.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rerun.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
@@ -47,6 +52,14 @@ class RGBDProcessNode : public rclcpp::Node {
 
     pointcloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
         "container_pointcloud", 10);
+    rec_ = std::make_shared<rerun::RecordingStream>("rgbd_process_node");
+    try {
+      rec_->spawn().throw_on_failure();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(),
+                   "Failed to spawn Rerun recording stream: %s", e.what());
+      rec_ = nullptr;
+    }
 
     // Declare parameters for crop box filter
     this->declare_parameter("crop_box.min_x", -1.0);
@@ -88,7 +101,7 @@ class RGBDProcessNode : public rclcpp::Node {
   }
 
   // Callback function for synchronized messages
-  void callback(
+  void callbackBoxDetection(
       const sensor_msgs::msg::Image::ConstSharedPtr& image1_msg,
       const sensor_msgs::msg::Image::ConstSharedPtr& image2_msg,
       const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg) {
@@ -160,9 +173,15 @@ class RGBDProcessNode : public rclcpp::Node {
       // Voxel grid filter
       pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
       voxel_filter.setInputCloud(cloud);
-      float voxel_size = 0.01f;
-      voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+      {
+        float voxel_size = 0.01f;
+        voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+      }
       voxel_filter.filter(*cloud);
+      if (rec_) {
+        dklib::perception::publisher::publishData<pcl::PointXYZRGB>(
+            *rec_, "/marker_47/camera/points", cloud);
+      }
 
       // Remove outliers
       pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> sor;
@@ -192,6 +211,10 @@ class RGBDProcessNode : public rclcpp::Node {
           detector(splitter);
       std::cout << "Detecting radial segments..." << std::endl;
       auto [bbox, min_points] = detector.execute();
+      if (rec_) {
+        dklib::perception::publisher::publishData(
+            *rec_, "marker_47/camera/container", bbox);
+      }
 
       std::cout << "Detected " << min_points->size() << " minimum points."
                 << std::endl;
@@ -200,31 +223,93 @@ class RGBDProcessNode : public rclcpp::Node {
       std::cout << "Processing time: " << processing_time.count() << " ms"
                 << std::endl;
 
-      auto inline_points = detector.getInlinePoints();
-      // publish point cloud
-      sensor_msgs::msg::PointCloud2 output_msg;
-      pcl::toROSMsg(*inline_points, output_msg);
-      output_msg.header = image1_msg->header;
-      pointcloud_pub_->publish(output_msg);
+      double voxel_size = 0.02;
+      dklib::perception::reconstruction::BoxInteriorReconstructor reconstructor(
+          bbox, voxel_size);
+      reconstructor.update<pcl::PointXYZRGB>(*cloud,
+                                             Eigen::Matrix4f::Identity());
+      pcl::PointCloud<pcl::PointXYZI>::Ptr icloud(
+          new pcl::PointCloud<pcl::PointXYZI>());
+      *icloud = reconstructor.getSdfVoxelInBox();
 
-      visualization_msgs::msg::Marker marker =
-          convertPolygon2LineStripMarker<pcl::PointXYZRGB>(min_points);
-      marker.header = image1_msg->header;
-      marker.ns = "container_area";
-      marker.id = 0;
-      marker_pub_->publish(marker);
+      if (rec_) {
+        dklib::perception::publisher::publishData(
+            *rec_, "marker_47/camera/container/sdf",
+            Eigen::Isometry3d(bbox.getTransformation().cast<double>()));
+        dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
+            *rec_, "marker_47/camera/container/sdf/tsdf", icloud, voxel_size);
 
-      visualization_msgs::msg::Marker box_marker =
-          convertBoundingBox3DMarker(bbox);
-      box_marker.header = image1_msg->header;
-      box_marker.ns = "container_box";
-      box_marker.id = 0;
-      box_marker_pub_->publish(box_marker);
+        pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud(
+            new pcl::PointCloud<pcl::PointXYZI>());
+        *ecloud = reconstructor.getEsdfVoxelInBox();
+        dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
+            *rec_, "marker_47/camera/container/sdf/esdf", ecloud, voxel_size);
+
+        pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud_filtered(
+            new pcl::PointCloud<pcl::PointXYZI>());
+        ecloud_filtered->reserve(ecloud->size());
+        const double target_half = 0.05f;
+        for (const auto& point : ecloud->points) {
+          if (point.intensity > target_half &&
+              point.intensity < voxel_size + target_half) {
+            ecloud_filtered->points.push_back(point);
+          }
+        }
+
+        dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
+            *rec_, "marker_47/camera/container/sdf/placeable", ecloud_filtered,
+            voxel_size);
+      }
+
     } catch (const cv_bridge::Exception& e) {
       RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
     } catch (const std::exception& e) {
       RCLCPP_ERROR(this->get_logger(), "Exception: %s", e.what());
     }
+  }
+
+  void callbackMarkerDetection(
+      const sensor_msgs::msg::Image::ConstSharedPtr& image1_msg,
+      const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg) {
+    auto detector = dklib::perception::detection::d3::createMarkerDetector<
+        dklib::perception::detection::d3::ArucoMarkerTarget3DPoseDetector::
+            Param>(dklib::perception::detection::d3::MarkerTargetType::ARUCO,
+                   {cv::aruco::DICT_4X4_50});
+    cv::Mat rgb_img = cv_bridge::toCvShare(image1_msg, "bgr8")->image;
+    Eigen::Matrix3d camera_intrinsics =
+        Eigen::Map<const Eigen::Matrix<double, 3, 3, Eigen::RowMajor>>(
+            camera_info_msg->k.data());
+
+    auto result = detector->detectMarkerWithID(
+        rgb_img, 47, 0.04, camera_intrinsics, {0, 0, 0, 0, 0});
+    if (result) {
+      std::cout << "Detected marker pose: \n" << result->matrix() << std::endl;
+    } else {
+      std::cout << "Marker not detected." << std::endl;
+    }
+  }
+
+  void callbackPublishMarkerDetectionRerun() {
+    Eigen::Matrix4d marker_pose = Eigen::Matrix4d::Identity();
+    marker_pose << -0.113459385327, -0.988681482824, -0.0981625865706,
+        -0.111166894074, -0.954312105941, 0.135935454724, -0.266101402859,
+        0.0366779660149, 0.276433305403, 0.0634860431118, -0.958933861116,
+        0.997429574978, 0, 0, 0, 1;
+    Eigen::Isometry3d marker_transform(marker_pose);
+    Eigen::Isometry3d inv_marker_transform = marker_transform.inverse();
+    if (rec_) {
+      dklib::perception::publisher::publishData(*rec_, "/marker_47/camera",
+                                                inv_marker_transform);
+    }
+  }
+
+  void callback(
+      const sensor_msgs::msg::Image::ConstSharedPtr& image1_msg,
+      const sensor_msgs::msg::Image::ConstSharedPtr& image2_msg,
+      const sensor_msgs::msg::CameraInfo::ConstSharedPtr& camera_info_msg) {
+    // callbackMarkerDetection(image1_msg, camera_info_msg);
+    callbackPublishMarkerDetectionRerun();
+    callbackBoxDetection(image1_msg, image2_msg, camera_info_msg);
   }
 
  private:
@@ -259,6 +344,8 @@ class RGBDProcessNode : public rclcpp::Node {
   std::shared_ptr<ExactSyncPolicy> exact_policy_;
   std::shared_ptr<ApproxSync> approx_sync_;
   std::shared_ptr<ExactSync> exact_sync_;
+
+  std::shared_ptr<rerun::RecordingStream> rec_;
 };
 
 int main(int argc, char* argv[]) {
