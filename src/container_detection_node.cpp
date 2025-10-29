@@ -19,7 +19,10 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <chrono>
+#include <cmath>
 #include <dk_perception/detection/d3/marker_target_detection.hpp>
+#include <dk_perception/geometry/bounding_box_3d.hpp>
+#include <dk_perception/optimization/placement_pose_esdf_based_optimizer.hpp>
 #include <dk_perception/reconstruction/reconstruction.hpp>
 #include <dk_perception/rerun/publish_data.hpp>
 #include <pcl/impl/point_types.hpp>
@@ -245,20 +248,46 @@ class RGBDProcessNode : public rclcpp::Node {
         dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
             *rec_, "marker_47/camera/container/sdf/esdf", ecloud, voxel_size);
 
-        pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud_filtered(
-            new pcl::PointCloud<pcl::PointXYZI>());
-        ecloud_filtered->reserve(ecloud->size());
-        const double target_half = 0.05f;
-        for (const auto& point : ecloud->points) {
-          if (point.intensity > target_half &&
-              point.intensity < voxel_size + target_half) {
-            ecloud_filtered->points.push_back(point);
-          }
-        }
+        dklib::perception::geometry::BoundingBox3D placement_target;
+        placement_target.size = Eigen::Vector3d(0.096, 0.063, 0.05);
+        placement_target.center = Eigen::Vector3d(0.0, 0.0, 0.0);
+        // rotation from box_top coord.
+        placement_target.orientation =
+            Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitX());
 
-        dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
-            *rec_, "marker_47/camera/container/sdf/placeable", ecloud_filtered,
-            voxel_size);
+        dklib::perception::optimization::PlacementPoseEsdfBasedOptimizer
+            place_optimizer;
+        {
+          const double box_min_radius =
+              0.5 *
+              std::min({placement_target.size.x(), placement_target.size.y(),
+                        placement_target.size.z()});
+          const double box_max_radius =
+              0.5 *
+              std::sqrt(placement_target.size.x() * placement_target.size.x() +
+                        placement_target.size.y() * placement_target.size.y() +
+                        placement_target.size.z() * placement_target.size.z());
+
+          pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud_filtered =
+              place_optimizer.computePlaceableCandidates(
+                  placement_target, reconstructor.getEsdfMap(),
+                  box_min_radius + voxel_size, box_max_radius + voxel_size);
+          dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
+              *rec_, "marker_47/camera/container/sdf/placeable",
+              ecloud_filtered, voxel_size);
+        }
+        auto optimized_place_box = place_optimizer.optimizePlacementPose(
+            placement_target, reconstructor.getEsdfMap());
+        if (optimized_place_box) {
+          if (rec_) {
+            dklib::perception::publisher::publishData(
+                *rec_, "marker_47/camera/container/sdf/placeable",
+                *optimized_place_box, {0, 0, 255, 200}, 0.01f,
+                rerun::components::FillMode::Solid);
+          }
+        } else {
+          std::cout << "No valid placement pose found!!!!!" << std::endl;
+        }
       }
 
     } catch (const cv_bridge::Exception& e) {
