@@ -26,6 +26,13 @@ find_package(pcl_conversions REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 
+# using openmp
+find_package(OpenMP REQUIRED)
+if(OpenMP_FOUND)
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
+
 # add_executable(depth_meshing_node src/depth_meshing_node.cpp)
 # target_include_directories( depth_meshing_node PUBLIC
 # $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -85,6 +92,7 @@ ament_target_dependencies(
   "pcl_conversions"
   "message_filters")
 
+# use openMP
 target_link_libraries(
   rgbd_process_node
   ${PCL_LIBRARIES}

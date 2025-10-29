@@ -30,8 +30,9 @@ visualization_msgs::msg::Marker convertPolygon2LineStripMarker(
   return marker;
 }
 
+template <typename BoundingBox3D>
 visualization_msgs::msg::Marker convertBoundingBox3DMarker(
-    const dklib::perception::detection::d3::BoundingBox3D& bbox) {
+    const BoundingBox3D& bbox) {
   visualization_msgs::msg::Marker marker;
   marker.type = visualization_msgs::msg::Marker::CUBE;
   marker.scale.x = bbox.size.x();

@@ -4,6 +4,7 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/synchronizer.h>
 #include <pcl/ModelCoefficients.h>
+#include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/filter_indices.h>
@@ -16,6 +17,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <Eigen/Core>
+#include <chrono>
 #include <pcl/impl/point_types.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -102,6 +104,7 @@ class RGBDProcessNode : public rclcpp::Node {
                  camera_info_msg->header.stamp.sec,
                  camera_info_msg->header.stamp.nanosec);
 
+    //  measure processing time
     try {
       // Convert ROS image messages to OpenCV images
       cv_bridge::CvImageConstPtr cv_image1 =
@@ -129,17 +132,21 @@ class RGBDProcessNode : public rclcpp::Node {
 
       pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(
           new pcl::PointCloud<pcl::PointXYZRGB>());
-      cloud->reserve(accessor.size());
-      for (size_t i = 0; i < accessor.size(); ++i) {
-        pcl::PointXYZRGB point;
-        point.x = accessor.point_at(i)[0];
-        point.y = accessor.point_at(i)[1];
-        point.z = accessor.point_at(i)[2];
+      cloud->resize(accessor.size());
+
+      auto start = std::chrono::high_resolution_clock::now();
+
+#pragma omp parallel for
+      for (ptrdiff_t i = 0; i < static_cast<ptrdiff_t>(accessor.size()); ++i) {
+        pcl::PointXYZRGB& point = cloud->points[i];
+        const auto& pt = accessor.point_at(i);
+        point.x = pt[0];
+        point.y = pt[1];
+        point.z = pt[2];
         auto color = accessor.color_at(i).value();
         point.r = color[2];
         point.g = color[1];
         point.b = color[0];
-        cloud->push_back(point);
       }
 
       // remove nan points
@@ -153,44 +160,22 @@ class RGBDProcessNode : public rclcpp::Node {
       // Voxel grid filter
       pcl::VoxelGrid<pcl::PointXYZRGB> voxel_filter;
       voxel_filter.setInputCloud(cloud);
-      float voxel_size = 0.005f;  // 20mm voxel size
+      float voxel_size = 0.01f;
       voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
       voxel_filter.filter(*cloud);
 
       // Remove outliers
       pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> sor;
       sor.setInputCloud(cloud);
-      sor.setMeanK(50);
+      sor.setMeanK(30);
       sor.setStddevMulThresh(1.0);
       sor.filter(*cloud);
-
-      // // crop box filter
-      // pcl::CropBox<pcl::PointXYZRGB> box_filter;
-      // box_filter.setInputCloud(cloud);
-
-      // // Get parameters for crop box filter
-      // double min_x = this->get_parameter("crop_box.min_x").as_double();
-      // double min_y = this->get_parameter("crop_box.min_y").as_double();
-      // double min_z = this->get_parameter("crop_box.min_z").as_double();
-      // double max_x = this->get_parameter("crop_box.max_x").as_double();
-      // double max_y = this->get_parameter("crop_box.max_y").as_double();
-      // double max_z = this->get_parameter("crop_box.max_z").as_double();
-
-      // Eigen::Vector4f min_point(min_x, min_y, min_z, 1.0);
-      // Eigen::Vector4f max_point(max_x, max_y, max_z, 1.0);
-      // box_filter.setMin(min_point);
-      // box_filter.setMax(max_point);
-      // box_filter.filter(*cloud);
 
       std::cout << "Point cloud size after outlier removal: " << cloud->size()
                 << std::endl;
 
       const Eigen::Vector3f origin = [&cloud]() {
         return Eigen::Vector3f::Zero();
-        // pcl::PointXYZ origin_pt;
-        // pcl::computeCentroid<pcl::PointXYZRGB, pcl::PointXYZ>(*cloud,
-        //                                                       origin_pt);
-        // return Eigen::Vector3f(origin_pt.x, origin_pt.y, origin_pt.z);
       }();
 
       std::cout << "Point cloud origin: [" << origin.transpose() << "]"
@@ -209,6 +194,10 @@ class RGBDProcessNode : public rclcpp::Node {
       auto [bbox, min_points] = detector.execute();
 
       std::cout << "Detected " << min_points->size() << " minimum points."
+                << std::endl;
+      auto end = std::chrono::high_resolution_clock::now();
+      std::chrono::duration<double, std::milli> processing_time = end - start;
+      std::cout << "Processing time: " << processing_time.count() << " ms"
                 << std::endl;
 
       auto inline_points = detector.getInlinePoints();
