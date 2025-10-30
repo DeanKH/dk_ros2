@@ -181,10 +181,8 @@ class RGBDProcessNode : public rclcpp::Node {
         voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
       }
       voxel_filter.filter(*cloud);
-      if (rec_) {
-        dklib::perception::publisher::publishData<pcl::PointXYZRGB>(
-            *rec_, "/marker_47/camera/points", cloud);
-      }
+      dklib::perception::publisher::publishData<pcl::PointXYZRGB>(
+          rec_, "/marker_47/camera/points", cloud);
 
       // Remove outliers
       pcl::StatisticalOutlierRemoval<pcl::PointXYZRGB> sor;
@@ -214,10 +212,8 @@ class RGBDProcessNode : public rclcpp::Node {
           detector(splitter);
       std::cout << "Detecting radial segments..." << std::endl;
       auto [bbox, min_points] = detector.execute();
-      if (rec_) {
-        dklib::perception::publisher::publishData(
-            *rec_, "marker_47/camera/container", bbox);
-      }
+      dklib::perception::publisher::publishData(
+          rec_, "marker_47/camera/container", bbox);
 
       std::cout << "Detected " << min_points->size() << " minimum points."
                 << std::endl;
@@ -237,16 +233,16 @@ class RGBDProcessNode : public rclcpp::Node {
 
       if (rec_) {
         dklib::perception::publisher::publishData(
-            *rec_, "marker_47/camera/container/sdf",
+            rec_, "marker_47/camera/container/sdf",
             Eigen::Isometry3d(bbox.getTransformation().cast<double>()));
         dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
-            *rec_, "marker_47/camera/container/sdf/tsdf", icloud, voxel_size);
+            rec_, "marker_47/camera/container/sdf/tsdf", icloud, voxel_size);
 
         pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud(
             new pcl::PointCloud<pcl::PointXYZI>());
         *ecloud = reconstructor.getEsdfVoxelInBox();
         dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
-            *rec_, "marker_47/camera/container/sdf/esdf", ecloud, voxel_size);
+            rec_, "marker_47/camera/container/sdf/esdf", ecloud, voxel_size);
 
         dklib::perception::geometry::BoundingBox3D placement_target;
         placement_target.size = Eigen::Vector3d(0.096, 0.063, 0.05);
@@ -273,15 +269,15 @@ class RGBDProcessNode : public rclcpp::Node {
                   placement_target, reconstructor.getEsdfMap(),
                   box_min_radius + voxel_size, box_max_radius + voxel_size);
           dklib::perception::publisher::publishVoxelData<pcl::PointXYZI>(
-              *rec_, "marker_47/camera/container/sdf/placeable",
-              ecloud_filtered, voxel_size);
+              rec_, "marker_47/camera/container/sdf/placeable", ecloud_filtered,
+              voxel_size);
         }
         auto optimized_place_box = place_optimizer.optimizePlacementPose(
             placement_target, reconstructor.getEsdfMap());
         if (optimized_place_box) {
           if (rec_) {
             dklib::perception::publisher::publishData(
-                *rec_, "marker_47/camera/container/sdf/placeable",
+                rec_, "marker_47/camera/container/sdf/placeable",
                 *optimized_place_box, {0, 0, 255, 200}, 0.01f,
                 rerun::components::FillMode::Solid);
           }
@@ -326,10 +322,8 @@ class RGBDProcessNode : public rclcpp::Node {
         0.997429574978, 0, 0, 0, 1;
     Eigen::Isometry3d marker_transform(marker_pose);
     Eigen::Isometry3d inv_marker_transform = marker_transform.inverse();
-    if (rec_) {
-      dklib::perception::publisher::publishData(*rec_, "/marker_47/camera",
-                                                inv_marker_transform);
-    }
+    dklib::perception::publisher::publishData(rec_, "/marker_47/camera",
+                                              inv_marker_transform);
   }
 
   void callback(
