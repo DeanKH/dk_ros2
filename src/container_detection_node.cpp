@@ -264,6 +264,9 @@ class RGBDProcessNode : public rclcpp::Node {
             voxel_size);
 
         if (optimized_place_box) {
+          *optimized_place_box = place_optimizer.refinePlacementPose(
+              *optimized_place_box, reconstructor.getEsdfMap(), bbox);
+
           if (rec_) {
             publishData(rec_, "marker_47/camera/container/sdf/placeable",
                         *optimized_place_box, {0, 0, 255, 200}, 0.01f,
