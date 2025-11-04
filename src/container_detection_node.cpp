@@ -136,6 +136,8 @@ class RGBDProcessNode : public rclcpp::Node {
       minmaxFilter<uint16_t>(depth_image,
                              std::lround(depth_min_threshold_ * depth_factor_),
                              std::lround(depth_max_threshold_ * depth_factor_));
+      publishDepthImageData(rec_, "/marker_47/camera/image/depth", depth_image,
+                            depth_factor_);
 
       dklib::perception::type::pointcloud::DepthImageSet rgbd{
           cv_image1->image, depth_image, intrinsic,
@@ -250,27 +252,17 @@ class RGBDProcessNode : public rclcpp::Node {
 
         dklib::perception::optimization::PlacementPoseEsdfBasedOptimizer
             place_optimizer;
-        {
-          const double box_min_radius =
-              0.5 *
-              std::min({placement_target.size.x(), placement_target.size.y(),
-                        placement_target.size.z()});
-          const double box_max_radius =
-              0.5 *
-              std::sqrt(placement_target.size.x() * placement_target.size.x() +
-                        placement_target.size.y() * placement_target.size.y() +
-                        placement_target.size.z() * placement_target.size.z());
 
-          pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud_filtered =
-              place_optimizer.computePlaceableCandidates(
-                  placement_target, reconstructor.getEsdfMap(),
-                  box_min_radius + voxel_size, box_max_radius + voxel_size);
-          publishVoxelData<pcl::PointXYZI>(
-              rec_, "marker_47/camera/container/sdf/placeable", ecloud_filtered,
-              voxel_size);
-        }
+        pcl::PointCloud<pcl::PointXYZI>::Ptr ecloud_filtered(
+            new pcl::PointCloud<pcl::PointXYZI>);
+
         auto optimized_place_box = place_optimizer.optimizePlacementPose(
-            placement_target, reconstructor.getEsdfMap());
+            placement_target, reconstructor.getEsdfMap(), ecloud_filtered);
+
+        publishVoxelData<pcl::PointXYZI>(
+            rec_, "marker_47/camera/container/sdf/placeable", ecloud_filtered,
+            voxel_size);
+
         if (optimized_place_box) {
           if (rec_) {
             publishData(rec_, "marker_47/camera/container/sdf/placeable",
