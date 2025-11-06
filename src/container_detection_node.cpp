@@ -264,14 +264,25 @@ class RGBDProcessNode : public rclcpp::Node {
             voxel_size);
 
         if (optimized_place_box) {
-          *optimized_place_box = place_optimizer.refinePlacementPose(
-              *optimized_place_box, reconstructor.getEsdfMap(), bbox);
+          Eigen::Vector3d shift_dir;
+          auto bottom_grid_points = place_optimizer.getBoxBottomGridPoints(
+              *optimized_place_box, reconstructor.getEsdfMap(), shift_dir);
+          rerun::publishArrowData(
+              rec_, "marker_47/camera/container/sdf/box_bottom_grid/arrow",
+              optimized_place_box->center, shift_dir);
+          publishVoxelData<pcl::PointXYZI>(
+              rec_, "marker_47/camera/container/sdf/box_bottom_grid",
+              bottom_grid_points, voxel_size, 1.0f);
+          publishData(rec_, "marker_47/camera/container/sdf/placeable",
+                      *optimized_place_box, {0, 0, 255, 200}, 0.01f,
+                      rerun::components::FillMode::Solid);
+          *optimized_place_box =
+              place_optimizer.refinePlacementPoseByUniformlyXY(
+                  *optimized_place_box, reconstructor.getEsdfMap(), bbox);
+          publishData(rec_, "marker_47/camera/container/sdf/placeable_refined",
+                      *optimized_place_box, {255, 0, 0, 200}, 0.01f,
+                      rerun::components::FillMode::Solid);
 
-          if (rec_) {
-            publishData(rec_, "marker_47/camera/container/sdf/placeable",
-                        *optimized_place_box, {0, 0, 255, 200}, 0.01f,
-                        rerun::components::FillMode::Solid);
-          }
         } else {
           std::cout << "No valid placement pose found!!!!!" << std::endl;
         }
