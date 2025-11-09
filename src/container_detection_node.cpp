@@ -15,6 +15,7 @@
 #include <pcl/sample_consensus/model_types.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl_conversions/pcl_conversions.h>
+#include <voxblox/mesh/mesh_integrator.h>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -242,6 +243,13 @@ class RGBDProcessNode : public rclcpp::Node {
         *ecloud = reconstructor.getEsdfVoxelInBox();
         publishVoxelData<pcl::PointXYZI>(
             rec_, "marker_47/camera/container/sdf/esdf", ecloud, voxel_size);
+
+        // mesh generation
+        {
+          auto [cloud, polygons] = reconstructor.generateMesh();
+          publishMeshData(rec_, "marker_47/camera/container/sdf/mesh", cloud,
+                          polygons);
+        }
 
         dklib::perception::geometry::BoundingBox3D placement_target;
         placement_target.size = Eigen::Vector3d(0.096, 0.063, 0.05);
