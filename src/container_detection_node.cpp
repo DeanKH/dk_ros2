@@ -26,6 +26,7 @@
 #include <dk_perception/optimization/placement_pose_esdf_based_optimizer.hpp>
 #include <dk_perception/reconstruction/reconstruction.hpp>
 #include <dk_perception/rerun/publish_data.hpp>
+#include <opencv2/opencv.hpp>
 #include <pcl/impl/point_types.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rerun.hpp>
@@ -43,6 +44,25 @@ template <typename ImageType>
 void minmaxFilter(cv::Mat& img, ImageType min, ImageType max) {
   cv::Mat mask = (img >= min) & (img <= max);
   img.setTo(0, ~mask);  // Set pixels outside the range to 0
+}
+
+// 3Dのポリゴンをカメラスクリーンに投影し，その外接矩形を取得する関数
+cv::Rect get2DRoiFrom3DPolygon(const std::vector<Eigen::Vector3f>& polygon_3d,
+                               const Eigen::Matrix3f& intrinsic,
+                               const cv::Size& image_size) {
+  // 3Dポリゴンの各頂点を2Dに投影
+  std::vector<cv::Point2f> projected_points;
+  for (const auto& point : polygon_3d) {
+    Eigen::Vector3f projected = intrinsic * point;
+    projected_points.emplace_back(projected.x() / projected.z(),
+                                  projected.y() / projected.z());
+  }
+
+  // 2Dの外接矩形を計算
+  cv::Rect roi = cv::boundingRect(projected_points);
+  roi &= cv::Rect(0, 0, image_size.width,
+                  image_size.height);  // 画像サイズにクリップ
+  return roi;
 }
 
 class RGBDProcessNode : public rclcpp::Node {
@@ -132,11 +152,19 @@ class RGBDProcessNode : public rclcpp::Node {
               camera_info_msg->k.data())
               .cast<float>();
 
+      cv::Size image_size(cv_image1->image.cols, cv_image1->image.rows);
+      publishPinholeCameraData(rec_, "/marker_47/camera/image/rgb",
+                               intrinsic(0, 0), image_size);
+
+      publishColorImageData(rec_, "/marker_47/camera/image/rgb",
+                            cv_image1->image);
       cv::Mat depth_image = cv_image2->image;
 
       minmaxFilter<uint16_t>(depth_image,
                              std::lround(depth_min_threshold_ * depth_factor_),
                              std::lround(depth_max_threshold_ * depth_factor_));
+      publishPinholeCameraData(rec_, "/marker_47/camera/image/depth",
+                               intrinsic(0, 0), image_size);
       publishDepthImageData(rec_, "/marker_47/camera/image/depth", depth_image,
                             depth_factor_);
 
@@ -215,6 +243,25 @@ class RGBDProcessNode : public rclcpp::Node {
       std::cout << "Detecting radial segments..." << std::endl;
       auto [bbox, min_points] = detector.execute();
       publishData(rec_, "marker_47/camera/container", bbox);
+
+      /// bboxの上面を2Dに投影して概説矩形を取得する
+      {
+        auto box_corners = bbox.getCorners();
+        // 上面の4頂点
+        std::vector<Eigen::Vector3f> top_face;
+        top_face.reserve(4);
+        top_face.push_back(box_corners[4].cast<float>());
+        top_face.push_back(box_corners[5].cast<float>());
+        top_face.push_back(box_corners[6].cast<float>());
+        top_face.push_back(box_corners[7].cast<float>());
+        cv::Rect roi = get2DRoiFrom3DPolygon(top_face, intrinsic, image_size);
+        std::cout << "Container ROI: " << roi << std::endl;
+        publishData(rec_, "/marker_47/camera/image/rgb/roi", roi);
+
+        cv::Mat image = cv_image1->image.clone();
+        cv::Mat image_with_roi = image(roi).clone();
+        cv::imwrite("container_roi.png", image_with_roi);
+      }
 
       std::cout << "Detected " << min_points->size() << " minimum points."
                 << std::endl;
@@ -342,6 +389,7 @@ class RGBDProcessNode : public rclcpp::Node {
     // callbackMarkerDetection(image1_msg, camera_info_msg);
     callbackPublishMarkerDetectionRerun();
     callbackBoxDetection(image1_msg, image2_msg, camera_info_msg);
+    // std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
 
  private:
